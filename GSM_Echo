@@ -1,0 +1,240 @@
+#include <GSM.h>
+#include <JeeLib.h>  // Include library containing low power functions
+ISR(WDT_vect) { Sleepy::watchdogEvent(); } // Setup for low power waiting
+
+#define PINNUMBER ""
+
+// (1) take measurement every MeasInMin min and convert the data into hourly data
+// (2) store the hourly data as a daily summary for 1 week
+// (3) send data using SIM card ever week
+// (4) monitor if data transmission is successful, if not, retry
+
+
+// initialize the library instance
+GSM gsmAccess; // include a 'true' parameter for debug enabled
+GSM_SMS sms;
+
+// define data measurement frequency
+int MeasInMin = 10 ; // in minutes
+int MeasInMillis ; // in millisecond
+
+// contact
+char EchoID[] = "0000000000"; // Echo ID (local phone number?)
+char EchoLoc[] = "St.Boniface_RoomXX"; // Echo ID (local phone number?)
+char EchoRemoteNum[] = "0000000000"; // Echo's Twilio Number
+char EmergencyNum[] = "0000000000"; // local contact
+
+int WeekNum = 0; //Week number for reporting, counter since installation
+
+// for currecnt measurement
+int analogPin1 = 0;
+int sensorValue1; // direct measurement from the sensor
+int offset1 = 509; // sensorValue1 when no electricity is coming
+float mVperAmp = 100; // use 185 for 5A Module, 100 for 20A Module, and 66 for 30A Module (*check again)
+int onSwitch = 4; // Threshold ampare to consider the Firedly is on [A] (Firefly works with 5 Amp)
+int mVoltage; // voltage [mV]
+int Amps; // current [A]
+float DlyUpTime = 0 ; // daily uptime [hr]
+int WlyUpTime[7] = {0,0,0,0,0,0,0} ; // weekly uptime [hr]
+int WlyUpTimeo[7] = {0,0,0,0,0,0,0} ; // weekly uptime [hr], old values stored
+
+// for currecnt measurement
+int analogPin2 = 3;
+int sensorValue2; // direct measurement from the sensor
+float TmpC; // temperature [degC]
+float TmpCo; // oldtemperature stored [degC]
+float DlyTmp ; // daily average temperature [degC]
+int WlyTmp[7] = {0,0,0,0,0,0,0} ; // weekly average temperature [degC]
+int WlyTmpo[7] = {0,0,0,0,0,0,0} ; // weekly average temperature [degC], old values stored
+int DlyCold; // extreme holdness counter [hr]
+int WlyCold[7] = {0,0,0,0,0,0,0} ; //
+int WlyColdo[7] = {0,0,0,0,0,0,0} ; // old values stored
+int DlyHot; // extreme hotness counter [hr]
+int WlyHot[7] = {0,0,0,0,0,0,0} ; //
+int WlyHoto[7] = {0,0,0,0,0,0,0} ; // old values stored
+int LowLim = 16 ; // temperature lower than this would considered as extreme cold temperature [degC] 
+int HighLim = 25 ; // temperature higher than this would considered as extreme hot temperature [degC] 
+int LowAlert = 13 ; // temperature lower than this would be immediately reported [degC] 
+int HighAlert = 28 ; // temperature higher than this would be immediately reported [degC] 
+
+
+// counters
+int i;
+int j;
+
+int statusTransmission = 0; // data transmission status; 0: successful, 1: no access
+
+boolean replay = true;
+
+void setup()
+{
+  // initialize serial communications
+  Serial.begin(9600);
+  
+  // **GSM Shield Setup**
+  Serial.println("Setting up GSM connection...");
+
+  // connection state
+  boolean notConnected = true;
+
+  // Start GSM shield
+  // If your SIM has PIN, pass it as a parameter of begin() in quotes
+  while (notConnected)
+  {
+    if (gsmAccess.begin(PINNUMBER) == GSM_READY)
+    {
+      notConnected = false;
+      Serial.println("Connected");
+    }
+    else
+    {
+      Serial.println("Not connected");
+      delay(1000);
+    }
+  }
+
+  Serial.println("GSM initialized");
+  Serial.print("Data will be reported weekly to: ");
+  Serial.println(EchoRemoteNum);
+  Serial.print("Emergency contact is set at: ");
+  Serial.println(EmergencyNum);
+  // **End: GSM Shield Setup**
+  
+  // Data measurement frequency
+  MeasInMillis = MeasInMin*60*1000;
+}
+
+void loop()
+{
+  // **Weekly loop**
+  WeekNum = WeekNum + 1;
+  for (int = DayCount = 1; DayCount <= 7; DayCount++)
+  {
+  
+  // **Daily loop**
+      DlyUpTime = 0; 
+      DlyTmp = 0;
+      DlyCold = 0;
+      DlyHot = 0;
+      for (int HourCount = 1; HourCount <= 24; HourCount++)
+      {
+        i = 1;
+        while (i <= 60/MeasInMin)
+        {
+          // current reading
+        sensorValue1 = analogRead(analogPin1);
+        mVoltage = (sensorValue1 - offset1)/1023*5000; 
+        Amps = mVoltage/mVperAmp ; 
+        
+        if (Amps > onSwitch)
+          {
+            DlyUpTime = DlyUpTime + MeasInMin/60 ; // cummulative hour [hr]
+          }
+          
+          // temperature reading
+        sensorValue2 = analogRead(analogPin2);
+        TmpC = (sensorValue2*5000/1024 - 500)/10 ; // for TMP36 temperature sensor using 5sensorValue2 output
+             
+        DlyTmp = DlyTmp + TmpC*MeasInMin/60/24 ; // average temperature[degC]
+          
+        if (TmpC < LowLim)
+          {            DlyCold = DlyCold + MeasInMin/60 ; // cummulative hour [hr]
+          }
+        if (TmpC > HighLim)
+          {
+            DlyHot = DlyHot + MeasInMin/60 ; // cummulative hour [hr]
+          }
+          
+           // report emergency
+        if ((TmpC > HighAlert) && (TmpCo > HighAlert)) // to neglect erroneous abnormal reading 
+          {
+              sms.beginSMS(EmergencyNum);
+              sms.print("Alerm: High temperature detected at ");
+              sms.println(EchoLoc); 
+              sms.println(TmpC); 
+              sms.endSMS();
+          }
+        if ((TmpC < LowAlert) && (TmpCo < LowAlert)) // to neglect erroneous abnormal reading 
+          {
+              sms.beginSMS(EmergencyNum);
+              sms.print("Alerm: Low temperature detected at ");
+              sms.println(EchoLoc); 
+              sms.println(TmpC); 
+              sms.endSMS();
+          }      
+        TmpCo = TmpC ;
+        
+         
+           // sleep time for Echo... energy conservation 
+        for (byte n = 0; n < MeasInMin; ++n)
+          {
+            Sleepy::loseSomeTime(60000); // Maximum value for looseSomeTime function is 60000 millis (60 sec).
+          }
+        
+        }
+        
+      // if routine data report failed last time, try sending data
+      if (tatusTransmission == 1)
+      {
+        if(gsmAccess.begin(PINNUMBER)==GSM_READY)
+        {
+          tatusTransmission = 0;
+                
+          sms.beginSMS(EchoRemoteNum);
+          //sms.println(EchoID); // ban be tell when SMS is send
+          //sms.println(EchoLoc); 
+          sms.print(WeekNum);
+          sms.print(WlyUpTimeo[1],WlyUpTimeo[2],WlyUpTimeo[3],WlyUpTimeo[4],WlyUpTimeo[5],WlyUpTimeo[6],WlyUpTimeo[7]);
+          sms.print(WlyTmpo[1],WlyTmpo[2],WlyTmpo[3],WlyTmpo[4],WlyTmpo[5],WlyTmpo[6],WlyTmpo[7]);
+          sms.print(WlyColdo[1],WlyColdo[2],WlyColdo[3],WlyColdo[4],WlyColdo[5],WlyColdo[6],WlyColdo[7]);
+          sms.print(WlyHoto[1],WlyHoto[2],WlyHoto[3],WlyHoto[4],WlyHoto[5],WlyHoto[6],WlyHoto[7]);      
+          sms.endSMS();
+        }
+      }
+      }
+      // store daily data in arrays (data type as integer)
+      WlyUpTime[Daycount] = DlyUpTime ; 
+      WlyTmp[Daycount] = DlyTmp ; 
+      WlyCold[Daycount] = DlyCold ;
+      WlyHot[Daycount] = DlyHot ;
+      
+      
+  // **End: Daily loop**
+      }
+      
+      // routine data report
+      if(gsmAccess.begin(PINNUMBER)==GSM_READY)
+      {
+        tatusTransmission = 0;
+                
+        sms.beginSMS(EchoRemoteNum);
+        //sms.println(EchoID); // ban be tell when SMS is send
+        //sms.println(EchoLoc); 
+        sms.print(WeekNum);
+        sms.print(WlyUpTime[1],WlyUpTime[2],WlyUpTime[3],WlyUpTime[4],WlyUpTime[5],WlyUpTime[6],WlyUpTime[7]);
+        sms.print(WlyTmp[1],WlyTmp[2],WlyTmp[3],WlyTmp[4],WlyTmp[5],WlyTmp[6],WlyTmp[7]);
+        sms.print(WlyCold[1],WlyCold[2],WlyCold[3],WlyCold[4],WlyCold[5],WlyCold[6],WlyCold[7]);
+        sms.print(WlyHot[1],WlyHot[2],WlyHot[3],WlyHot[4],WlyHot[5],WlyHot[6],WlyHot[7]);      
+        sms.endSMS();
+      }
+      else
+      {
+        tatusTransmission = 1;
+        
+        // store values
+        for (int n = 1; n <= 7; n++)\
+        {
+         WlyUpTimeo[n] = WlyUpTime[n]; 
+         WlyTmpo[n] = WlyTmp[n];
+         WlyColdo[n] = WlyCold[n];
+         WlyHoto[n] = WlyHot[n];
+        }
+      }
+
+ 
+  
+  // **End: Weekly loop**
+  }
+  
+
+}
